@@ -1,12 +1,13 @@
-use std::{sync::{Mutex, atomic::{AtomicBool, Ordering::Relaxed}}, time::{Duration, Instant}};
+use std::{cell::RefCell, io::{Write, stdout}, sync::{Mutex, atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed}}, time::{Duration, Instant}};
 
 use crossterm::{event::{self, Event, KeyCode, KeyEventKind, KeyModifiers}, terminal::{disable_raw_mode, enable_raw_mode}};
 
-use crate::input::InputState::{Continue, Exit, Status};
+use crate::input::InputState::{Continue, Exit, No, Status};
 
 enum InputState<T> {
     Exit,
     Continue,
+    No,
     Status(T),
 }
 
@@ -16,7 +17,7 @@ impl<T> InputState <T>{
     }
 }
 
-pub static STOP: AtomicBool = AtomicBool::new(false);
+pub static PAUSE: AtomicBool = AtomicBool::new(false);
 
 pub fn poll_input() {
     enable_raw_mode().unwrap();
@@ -27,8 +28,11 @@ pub fn poll_input() {
         // break;
     } else {
         match input {
-            Status("stop") => {STOP.store(true,Relaxed);},
+            Status("pause") => {
+                    PAUSE.store(true,Relaxed);  
+                },
             Status("b") => {},
+            Continue => {PAUSE.store(false, Relaxed);}
             _ => {}
         }
     }
@@ -36,36 +40,48 @@ pub fn poll_input() {
 
 }
 
+pub static MESSAGE: Mutex<RefCell<[u8; 64]>> = Mutex::new(RefCell::new([0; 64]));
+pub static INDEX: AtomicUsize = AtomicUsize::new(0);
+pub static READY: AtomicBool = AtomicBool::new(false);
+
 fn handle_input() -> InputState<&'static str> {
         if event::poll(Duration::from_millis(50)).unwrap() {
     // 3. Read the captured event
-        if let Event::Key(key) = event::read().unwrap() {
-            // Focus only on the initial Press event (ignoring Release/Repeat)
-            if key.kind == KeyEventKind::Press {
+        if let Event::Key(key) = event::read().unwrap() && key.kind == KeyEventKind::Press {
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
                     match key.code {
                         KeyCode::Char('c') => return program_exit(),
-                        KeyCode::Char('s') => return Status("stop"),
+                        KeyCode::Char('s') => return pause(),
                         _ => {},
                     }
                 }
-                else {
+                else if PAUSE.load(Relaxed) {
                     match key.code {
                         KeyCode::Char(c) => {
-                            print!("You pressed character: {}\r\n", c);
+                            MESSAGE.lock().unwrap().borrow_mut()[INDEX.load(Relaxed)] = c as u8;
+                            INDEX.fetch_add(1, Relaxed);
+                            print!("{}", c);
+                            stdout().flush().unwrap();
                         }
-                        KeyCode::Left => {
-                            println!("Left arrow key pressed!");
+                        KeyCode::Enter => {
+                            READY.store(true, Relaxed);
                         }
                         _ => {}
                     }
                 }
             }
-        }
     }
 
 
-    Continue
+    No
+}
+
+fn pause() -> InputState<&'static str>{
+    if !PAUSE.load(Relaxed) {
+        Status("pause")
+    } else {
+        Continue
+    }
 }
 
 static LAST_CTRL_C: Mutex<Option<Instant>> = Mutex::new(None);
@@ -90,5 +106,5 @@ fn program_exit() -> InputState<&'static str> {
         }
     }
 
-    Continue
+    No
 }

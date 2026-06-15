@@ -1,13 +1,8 @@
 use std::{
-    env, fs,
-    path::Path,
-    process::Command,
-    sync::{Mutex, atomic::{AtomicBool, Ordering::Relaxed}},
-    thread,
-    time::{Duration, Instant},
+    env, fs::{self}, io::Write, path::Path, process::Command, sync::atomic::{AtomicBool, Ordering::Relaxed}, thread, time::{Duration, Instant}
 };
 
-use crossterm::{event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers}, terminal::{disable_raw_mode, enable_raw_mode}};
+use crossterm::terminal::disable_raw_mode;
 use defmt_decoder::{
     DecodeError, Frame, Locations, Table,
     log::{
@@ -17,7 +12,7 @@ use defmt_decoder::{
     },
 };
 use serialport::SerialPort;
-use usb_defmt_decoder::input::{SHOW_WARNING_UNTIL, STOP, poll_input};
+use usb_defmt_decoder::input::{INDEX, MESSAGE, PAUSE, READY, SHOW_WARNING_UNTIL, poll_input};
 
 const READ_BUFFER_SIZE: usize = 1024;
 const ELF: &str = "/home/Gary/Projects/Embedded/code/Rust/GO/target/thumbv6m-none-eabi/release/go";
@@ -26,6 +21,7 @@ fn main() {
     disable_raw_mode().unwrap();
 
     let mut source: Box<dyn SerialPort> = connect();
+    let mut writer = source.try_clone().unwrap();
 
     let elf = fs::read(ELF).expect("can't find path");
     let table = Table::parse(&elf).unwrap().unwrap();
@@ -58,8 +54,16 @@ fn main() {
 
     loop {
 
+
+
         poll_input();
-        if STOP.load(Relaxed) {
+        if PAUSE.load(Relaxed) {
+            if READY.swap(false, Relaxed) {
+                let data = &MESSAGE.lock().unwrap().borrow()[..INDEX.load(Relaxed)].to_vec();
+                if let Err(e) = writer.write_all(data) {
+                    eprintln!("write error: {:?}", e);
+                }
+            }
             continue;
         }
         if let Some(until) = *SHOW_WARNING_UNTIL.lock().unwrap() && Instant::now() < until {
@@ -103,7 +107,6 @@ fn main() {
         }
 
     }
-    disable_raw_mode().unwrap();
 
 }
 
@@ -148,10 +151,15 @@ fn connect() -> Box<dyn SerialPort + 'static> {
 
     match serialport::new(path.trim(), 115200)
         .timeout(Duration::from_secs(2))
+        .flow_control(serialport::FlowControl::None)
+        .dtr_on_open(true)
         .open()
     {
-        Ok(device) => {
+        Ok(mut device) => {
             println!("Connected to {}!", path.trim());
+
+            device.write_request_to_send(true).unwrap();
+
             thread::sleep(Duration::from_millis(1000u64));
             LOOKING_FOR_DEVICE.store(false, Relaxed);
 
